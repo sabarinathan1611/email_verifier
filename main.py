@@ -12,21 +12,15 @@ load_dotenv(verbose=True)
 
 app = FastAPI()
 
-# MongoDB connection with secure defaults
-MONGODB_URL = os.getenv("MONGODB_URL", "mongodb://localhost:27017")
-print(f"MongoDB URL: {MONGODB_URL}")
+# MongoDB connection function for serverless environment
+def get_mongodb_client():
+    MONGODB_URL = os.getenv("MONGODB_URL", "mongodb://localhost:27017")
+    return MongoClient(MONGODB_URL, serverSelectionTimeoutMS=5000)
 
-try:
-    client = MongoClient(MONGODB_URL, serverSelectionTimeoutMS=5000)
-    # Test the connection
-    client.admin.command('ping')
-    print("MongoDB connection successful")
-except Exception as e:
-    print(f"MongoDB connection failed: {e}")
-    raise
-
-db = client.email_verifier
-collection = db.verifications
+def get_collection():
+    client = get_mongodb_client()
+    db = client.email_verifier
+    return db.verifications
 
 class EmailRequest(BaseModel):
     email: EmailStr
@@ -49,6 +43,9 @@ async def verify_email_endpoint(data: EmailRequest):
             "is_valid": result,
             "verified_at": datetime.utcnow()
         }
+        
+        # Get collection for this request
+        collection = get_collection()
         
         # Check if email already exists and update, or insert new record
         existing_record = collection.find_one_and_update(
@@ -74,6 +71,7 @@ async def verify_email_endpoint(data: EmailRequest):
 async def get_verifications(limit: int = 10):
     """Get recent email verifications"""
     try:
+        collection = get_collection()
         verifications = list(collection.find().sort("verified_at", -1).limit(limit))
         for v in verifications:
             v["_id"] = str(v["_id"])
@@ -85,9 +83,21 @@ async def get_verifications(limit: int = 10):
 async def get_verification_by_email(email: str):
     """Get verification history for a specific email"""
     try:
+        collection = get_collection()
         verifications = list(collection.find({"email": email}).sort("verified_at", -1))
         for v in verifications:
             v["_id"] = str(v["_id"])
         return verifications
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error fetching verification: {str(e)}")
+
+@app.get("/health")
+async def health_check():
+    """Health check endpoint for Vercel"""
+    try:
+        collection = get_collection()
+        # Simple ping to check MongoDB connection
+        collection.database.client.admin.command('ping')
+        return {"status": "healthy", "message": "MongoDB connection successful"}
+    except Exception as e:
+        return {"status": "unhealthy", "message": f"MongoDB connection failed: {str(e)}"}
